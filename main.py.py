@@ -1,15 +1,15 @@
-import os
 import asyncio
 import logging
+import os
 import sqlite3
+from datetime import datetime
+from html import escape
 
 from aiohttp import web
+from dotenv import load_dotenv
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -18,7 +18,9 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-from dotenv import load_dotenv
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 
 
 # =========================================================
@@ -37,18 +39,35 @@ ADMIN_IDS = {
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 
-FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL", "").strip()
-FORCE_SUB_LINK = os.getenv("FORCE_SUB_LINK", "").strip()
+FORCE_SUB_CHANNEL = os.getenv(
+    "FORCE_SUB_CHANNEL",
+    ""
+).strip()
 
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "").strip()
+FORCE_SUB_LINK = os.getenv(
+    "FORCE_SUB_LINK",
+    ""
+).strip()
+
+SUPPORT_USERNAME = os.getenv(
+    "SUPPORT_USERNAME",
+    "@azamat_x007"
+).strip()
 
 PORT = int(os.getenv("PORT", "10000"))
 
+
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN .env da topilmadi!")
+    raise ValueError(
+        "BOT_TOKEN topilmadi! Render Environment Variables "
+        "yoki .env faylga BOT_TOKEN qo'ying."
+    )
 
 if not ADMIN_IDS:
-    raise ValueError("ADMIN_IDS .env da topilmadi!")
+    raise ValueError(
+        "ADMIN_IDS topilmadi! .env yoki Render Environment Variables "
+        "ga ADMIN_IDS=6698039974 qo'ying."
+    )
 
 
 # =========================================================
@@ -67,14 +86,8 @@ logger = logging.getLogger(__name__)
 # BOT
 # =========================================================
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
-    )
-)
-
-dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
 
 # =========================================================
@@ -94,26 +107,26 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            joined_at TEXT
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS movies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE,
+            code TEXT UNIQUE NOT NULL,
             title TEXT NOT NULL,
-            alt_title TEXT,
-            year TEXT,
-            genre TEXT,
-            rating TEXT,
-            description TEXT,
-            channel_message_id INTEGER,
+            alt_title TEXT DEFAULT '',
+            year INTEGER DEFAULT 0,
+            genre TEXT DEFAULT '',
+            rating TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            channel_message_id INTEGER NOT NULL,
             views INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT
         )
     """)
 
@@ -128,6 +141,12 @@ def init_db():
     conn.commit()
     conn.close()
 
+    logger.info("Database tayyor.")
+
+
+# =========================================================
+# USER
+# =========================================================
 
 def save_user(message: Message):
     if not message.from_user:
@@ -136,83 +155,130 @@ def save_user(message: Message):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        INSERT OR REPLACE INTO users
-        (user_id, username, first_name)
-        VALUES (?, ?, ?)
-    """, (
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    ))
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO users
+        (id, username, first_name, joined_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            message.from_user.id,
+            message.from_user.username or "",
+            message.from_user.first_name or "",
+            datetime.now().isoformat()
+        )
+    )
+
+    cur.execute(
+        """
+        UPDATE users
+        SET username = ?, first_name = ?
+        WHERE id = ?
+        """,
+        (
+            message.from_user.username or "",
+            message.from_user.first_name or "",
+            message.from_user.id
+        )
+    )
 
     conn.commit()
     conn.close()
 
 
-def is_admin(user_id: int) -> bool:
+# =========================================================
+# ADMIN
+# =========================================================
+
+def is_admin(user_id: int):
     return user_id in ADMIN_IDS
 
 
 # =========================================================
-# FORCE SUB
+# FORCE SUBSCRIPTION
 # =========================================================
 
-async def check_subscription(user_id: int) -> bool:
+async def check_subscription(user_id: int):
 
-    # Majburiy obuna o'chirilgan bo'lsa
+    # Agar force-sub o'chirilgan bo'lsa
     if not FORCE_SUB_CHANNEL:
         return True
 
     try:
+
         member = await bot.get_chat_member(
             chat_id=FORCE_SUB_CHANNEL,
             user_id=user_id
         )
 
-        return member.status in {
-            "creator",
+        return member.status in [
+            "member",
             "administrator",
-            "member"
-        }
+            "creator"
+        ]
 
     except Exception as e:
+
         logger.warning(
-            "Subscription check error: %s",
-            e
+            f"Subscription check error: {e}"
         )
 
-        # Agar kanal noto'g'ri sozlangan bo'lsa,
-        # bot butunlay ishlamay qolmasligi uchun False qaytaramiz.
         return False
 
 
 def subscription_keyboard():
 
-    buttons = []
-
-    if FORCE_SUB_LINK:
-        buttons.append([
-            InlineKeyboardButton(
-                text="📢 Kanalga obuna bo‘lish",
-                url=FORCE_SUB_LINK
-            )
-        ])
-
-    buttons.append([
-        InlineKeyboardButton(
-            text="✅ Obunani tekshirish",
-            callback_data="check_sub"
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📢 Kanalga obuna bo‘lish",
+                    url=FORCE_SUB_LINK
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Tekshirish",
+                    callback_data="check_sub"
+                )
+            ]
+        ]
+    )
 
 
-async def require_subscription(message: Message) -> bool:
+# =========================================================
+# MAIN KEYBOARD
+# =========================================================
 
-    if is_admin(message.from_user.id):
-        return True
+def main_keyboard():
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="🔎 Kino qidirish"),
+                KeyboardButton(text="🎬 Top kinolar")
+            ],
+            [
+                KeyboardButton(text="🆕 Yangi kinolar"),
+                KeyboardButton(text="📚 Janrlar")
+            ],
+            [
+                KeyboardButton(text="❤️ Sevimlilar"),
+                KeyboardButton(text="ℹ️ Yordam")
+            ]
+        ],
+        resize_keyboard=True
+    )
+
+
+# =========================================================
+# START
+# =========================================================
+
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+
+    save_user(message)
 
     subscribed = await check_subscription(
         message.from_user.id
@@ -221,66 +287,36 @@ async def require_subscription(message: Message) -> bool:
     if not subscribed:
 
         await message.answer(
-            "🔒 <b>Botdan foydalanish uchun kanalga obuna bo‘ling.</b>\n\n"
-            "1️⃣ Kanalga kiring\n"
-            "2️⃣ Obuna bo‘ling\n"
-            "3️⃣ «Obunani tekshirish» tugmasini bosing",
-            reply_markup=subscription_keyboard()
+            "🎬 <b>Kino botiga xush kelibsiz!</b>\n\n"
+            "Botdan foydalanish uchun kanalimizga "
+            "obuna bo‘ling.",
+            reply_markup=subscription_keyboard(),
+            parse_mode="HTML"
         )
 
-        return False
-
-    return True
-
-
-# =========================================================
-# KEYBOARD
-# =========================================================
-
-main_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text="🔎 Kino qidirish"),
-            KeyboardButton(text="🎬 Top kinolar")
-        ],
-        [
-            KeyboardButton(text="🆕 Yangi kinolar"),
-            KeyboardButton(text="📚 Janrlar")
-        ],
-        [
-            KeyboardButton(text="❤️ Sevimlilar"),
-            KeyboardButton(text="ℹ️ Yordam")
-        ]
-    ],
-    resize_keyboard=True
-)
-
-
-# =========================================================
-# START
-# =========================================================
-
-@dp.message(CommandStart())
-async def start_handler(message: Message):
-
-    save_user(message)
-
-    if not await require_subscription(message):
         return
 
+    first_name = escape(
+        message.from_user.first_name or "Do‘st"
+    )
+
     await message.answer(
-        f"🎬 <b>Assalomu alaykum, {message.from_user.first_name}!</b>\n\n"
-        "Kino qidirish uchun kod yoki kino nomini yuboring.",
-        reply_markup=main_keyboard
+        f"👋 Salom, <b>{first_name}</b>!\n\n"
+        "🎬 Kino qidirish botiga xush kelibsiz.\n\n"
+        "🔢 Kino kodini yuboring yoki kino nomini yozing.",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
     )
 
 
 # =========================================================
-# CHECK SUB CALLBACK
+# CHECK SUB
 # =========================================================
 
 @dp.callback_query(F.data == "check_sub")
-async def check_sub_callback(callback: CallbackQuery):
+async def check_sub_handler(
+    callback: CallbackQuery
+):
 
     subscribed = await check_subscription(
         callback.from_user.id
@@ -289,13 +325,13 @@ async def check_sub_callback(callback: CallbackQuery):
     if subscribed:
 
         await callback.message.edit_text(
-            "✅ <b>Obuna tasdiqlandi!</b>\n\n"
+            "✅ Obuna tasdiqlandi!\n\n"
             "Endi botdan foydalanishingiz mumkin."
         )
 
         await callback.message.answer(
-            "🎬 Bosh menyu",
-            reply_markup=main_keyboard
+            "🎬 Asosiy menyu:",
+            reply_markup=main_keyboard()
         )
 
     else:
@@ -307,29 +343,28 @@ async def check_sub_callback(callback: CallbackQuery):
 
 
 # =========================================================
-# SEARCH
+# MOVIE SEARCH
 # =========================================================
 
-async def search_movie(query: str):
+def search_movies(query):
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, code, title, alt_title, year,
-               genre, rating, description,
-               channel_message_id, views
+    q = f"%{query}%"
+
+    cur.execute(
+        """
+        SELECT id, code, title, year, genre, rating, views
         FROM movies
         WHERE code = ?
-           OR LOWER(title) LIKE LOWER(?)
-           OR LOWER(COALESCE(alt_title, '')) LIKE LOWER(?)
+           OR title LIKE ?
+           OR alt_title LIKE ?
         ORDER BY views DESC
         LIMIT 10
-    """, (
-        query,
-        f"%{query}%",
-        f"%{query}%"
-    ))
+        """,
+        (query, q, q)
+    )
 
     results = cur.fetchall()
 
@@ -338,13 +373,17 @@ async def search_movie(query: str):
     return results
 
 
-def movie_keyboard(movie_id: int):
+# =========================================================
+# MOVIE CARD
+# =========================================================
+
+def movie_keyboard(movie_id):
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="▶️ Ko‘rish",
+                    text="▶️ KINONI KO‘RISH",
                     callback_data=f"watch:{movie_id}"
                 )
             ],
@@ -370,129 +409,195 @@ def movie_text(movie):
         rating,
         description,
         channel_message_id,
-        views
+        views,
+        created_at
     ) = movie
 
-    text = f"🎬 <b>{title}</b>\n\n"
+    title = escape(str(title))
+    code = escape(str(code))
+    alt_title = escape(str(alt_title))
+    genre = escape(str(genre))
+    rating = escape(str(rating))
+    description = escape(str(description))
+
+    text = (
+        f"🎬 <b>{title}</b>\n\n"
+        f"🔢 Kod: <code>{code}</code>\n"
+        f"📅 Yil: {year}\n"
+        f"🎭 Janr: {genre}\n"
+        f"⭐ Reyting: {rating}\n"
+        f"👁 Ko‘rishlar: {views}\n"
+    )
 
     if alt_title:
         text += f"🌐 Boshqa nomi: {alt_title}\n"
 
-    if year:
-        text += f"📅 Yil: {year}\n"
-
-    if genre:
-        text += f"🎭 Janr: {genre}\n"
-
-    if rating:
-        text += f"⭐ Reyting: {rating}\n"
-
     if description:
-        text += f"\n📝 {description}\n"
-
-    text += f"\n👁 Ko‘rishlar: {views}"
+        text += f"\n📝 {description}"
 
     return text
 
 
-@dp.message(F.text == "🔎 Kino qidirish")
-async def search_button(message: Message):
+def get_movie(movie_id):
 
-    if not await require_subscription(message):
-        return
+    conn = db()
+    cur = conn.cursor()
 
-    await message.answer(
-        "🔎 Kino kodi yoki nomini yuboring."
+    cur.execute(
+        """
+        SELECT
+            id,
+            code,
+            title,
+            alt_title,
+            year,
+            genre,
+            rating,
+            description,
+            channel_message_id,
+            views,
+            created_at
+        FROM movies
+        WHERE id = ?
+        """,
+        (movie_id,)
     )
 
+    movie = cur.fetchone()
 
-@dp.message()
-async def search_handler(message: Message):
+    conn.close()
 
-    if not message.text:
-        return
+    return movie
+
+
+# =========================================================
+# SEARCH MESSAGE
+# =========================================================
+
+@dp.message(F.text)
+async def text_handler(message: Message):
 
     if message.text.startswith("/"):
         return
 
-    if message.text in {
-        "🎬 Top kinolar",
-        "🆕 Yangi kinolar",
-        "📚 Janrlar",
-        "❤️ Sevimlilar",
-        "ℹ️ Yordam"
-    }:
+    save_user(message)
+
+    subscribed = await check_subscription(
+        message.from_user.id
+    )
+
+    if not subscribed:
+
+        await message.answer(
+            "❗ Avval kanalga obuna bo‘ling.",
+            reply_markup=subscription_keyboard()
+        )
+
         return
 
-    if not await require_subscription(message):
+    text = message.text.strip()
+
+    if text == "🔎 Kino qidirish":
+
+        await message.answer(
+            "🔎 Kino nomi yoki kodini yuboring:"
+        )
+
         return
 
-    query = message.text.strip()
+    if text == "🎬 Top kinolar":
 
-    results = await search_movie(query)
+        await show_top_movies(message)
+
+        return
+
+    if text == "🆕 Yangi kinolar":
+
+        await show_new_movies(message)
+
+        return
+
+    if text == "📚 Janrlar":
+
+        await show_genres(message)
+
+        return
+
+    if text == "❤️ Sevimlilar":
+
+        await show_favorites(message)
+
+        return
+
+    if text == "ℹ️ Yordam":
+
+        await help_handler(message)
+
+        return
+
+    results = search_movies(text)
 
     if not results:
+
         await message.answer(
             "❌ Kino topilmadi.\n\n"
             "Kino kodi yoki nomini tekshirib qayta yuboring."
         )
+
         return
 
-    for movie in results:
+    for row in results:
 
-        await message.answer(
-            movie_text(movie),
-            reply_markup=movie_keyboard(movie[0])
-        )
+        movie_id = row[0]
+
+        movie = get_movie(movie_id)
+
+        if movie:
+
+            await message.answer(
+                movie_text(movie),
+                parse_mode="HTML",
+                reply_markup=movie_keyboard(movie_id)
+            )
 
 
 # =========================================================
-# WATCH
+# WATCH MOVIE
 # =========================================================
 
 @dp.callback_query(F.data.startswith("watch:"))
-async def watch_movie(callback: CallbackQuery):
-
-    if not await check_subscription(
-        callback.from_user.id
-    ):
-        await callback.answer(
-            "❌ Avval kanalga obuna bo‘ling.",
-            show_alert=True
-        )
-        return
+async def watch_movie(
+    callback: CallbackQuery
+):
 
     movie_id = int(
         callback.data.split(":")[1]
     )
 
-    conn = db()
-    cur = conn.cursor()
+    movie = get_movie(movie_id)
 
-    cur.execute("""
-        SELECT channel_message_id
-        FROM movies
-        WHERE id = ?
-    """, (movie_id,))
-
-    result = cur.fetchone()
-
-    if not result:
-        conn.close()
+    if not movie:
 
         await callback.answer(
             "❌ Kino topilmadi.",
             show_alert=True
         )
+
         return
 
-    channel_message_id = result[0]
+    message_id = movie[8]
 
-    cur.execute("""
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
         UPDATE movies
         SET views = views + 1
         WHERE id = ?
-    """, (movie_id,))
+        """,
+        (movie_id,)
+    )
 
     conn.commit()
     conn.close()
@@ -502,16 +607,17 @@ async def watch_movie(callback: CallbackQuery):
         await bot.copy_message(
             chat_id=callback.from_user.id,
             from_chat_id=CHANNEL_ID,
-            message_id=channel_message_id
+            message_id=message_id
         )
 
-        await callback.answer()
+        await callback.answer(
+            "🎬 Kino yuborildi!"
+        )
 
     except Exception as e:
 
         logger.error(
-            "Kino yuborishda xato: %s",
-            e
+            f"Movie copy error: {e}"
         )
 
         await callback.answer(
@@ -525,307 +631,345 @@ async def watch_movie(callback: CallbackQuery):
 # =========================================================
 
 @dp.callback_query(F.data.startswith("fav:"))
-async def favorite_movie(callback: CallbackQuery):
+async def favorite_handler(
+    callback: CallbackQuery
+):
 
     movie_id = int(
         callback.data.split(":")[1]
     )
 
-    user_id = callback.from_user.id
-
     conn = db()
     cur = conn.cursor()
 
-    try:
-
-        cur.execute("""
-            INSERT INTO favorites
-            (user_id, movie_id)
-            VALUES (?, ?)
-        """, (
-            user_id,
+    cur.execute(
+        """
+        SELECT 1
+        FROM favorites
+        WHERE user_id = ? AND movie_id = ?
+        """,
+        (
+            callback.from_user.id,
             movie_id
-        ))
+        )
+    )
 
-        conn.commit()
+    exists = cur.fetchone()
 
-        await callback.answer(
-            "❤️ Sevimlilarga qo‘shildi!"
+    if exists:
+
+        cur.execute(
+            """
+            DELETE FROM favorites
+            WHERE user_id = ? AND movie_id = ?
+            """,
+            (
+                callback.from_user.id,
+                movie_id
+            )
         )
 
-    except sqlite3.IntegrityError:
+        text = "❌ Sevimlilardan olib tashlandi."
 
-        await callback.answer(
-            "❤️ Bu kino allaqachon sevimlilarda."
+    else:
+
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO favorites
+            VALUES (?, ?)
+            """,
+            (
+                callback.from_user.id,
+                movie_id
+            )
         )
 
-    finally:
-        conn.close()
+        text = "❤️ Sevimlilarga qo‘shildi."
+
+    conn.commit()
+    conn.close()
+
+    await callback.answer(text)
 
 
 # =========================================================
-# TOP
+# TOP MOVIES
 # =========================================================
 
-@dp.message(F.text == "🎬 Top kinolar")
-async def top_movies(message: Message):
-
-    if not await require_subscription(message):
-        return
+async def show_top_movies(message):
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, code, title, alt_title,
-               year, genre, rating,
-               description, channel_message_id, views
+    cur.execute(
+        """
+        SELECT id, title, code, year, genre, views
         FROM movies
         ORDER BY views DESC
         LIMIT 10
-    """)
+        """
+    )
 
     movies = cur.fetchall()
+
     conn.close()
 
     if not movies:
 
         await message.answer(
-            "❌ Hozircha kinolar yo‘q."
+            "Hozircha kinolar mavjud emas."
         )
+
         return
 
-    await message.answer("🎬 <b>TOP kinolar</b>")
+    text = "🔥 <b>TOP KINOLAR</b>\n\n"
 
-    for movie in movies:
+    for i, movie in enumerate(movies, 1):
 
-        await message.answer(
-            movie_text(movie),
-            reply_markup=movie_keyboard(movie[0])
+        movie_id, title, code, year, genre, views = movie
+
+        text += (
+            f"{i}. <b>{escape(str(title))}</b>\n"
+            f"🔢 {escape(str(code))} | "
+            f"📅 {year} | "
+            f"👁 {views}\n\n"
         )
+
+    await message.answer(
+        text,
+        parse_mode="HTML"
+    )
 
 
 # =========================================================
-# NEW
+# NEW MOVIES
 # =========================================================
 
-@dp.message(F.text == "🆕 Yangi kinolar")
-async def new_movies(message: Message):
-
-    if not await require_subscription(message):
-        return
+async def show_new_movies(message):
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, code, title, alt_title,
-               year, genre, rating,
-               description, channel_message_id, views
+    cur.execute(
+        """
+        SELECT id, title, code, year, genre
         FROM movies
         ORDER BY id DESC
         LIMIT 10
-    """)
+        """
+    )
 
     movies = cur.fetchall()
+
     conn.close()
 
     if not movies:
 
         await message.answer(
-            "❌ Hozircha kinolar yo‘q."
+            "Hozircha kinolar mavjud emas."
         )
+
         return
 
-    await message.answer("🆕 <b>Yangi kinolar</b>")
+    text = "🆕 <b>YANGI KINOLAR</b>\n\n"
 
-    for movie in movies:
+    for i, movie in enumerate(movies, 1):
 
-        await message.answer(
-            movie_text(movie),
-            reply_markup=movie_keyboard(movie[0])
+        movie_id, title, code, year, genre = movie
+
+        text += (
+            f"{i}. <b>{escape(str(title))}</b>\n"
+            f"🔢 {escape(str(code))} | "
+            f"📅 {year} | "
+            f"🎭 {escape(str(genre))}\n\n"
         )
+
+    await message.answer(
+        text,
+        parse_mode="HTML"
+    )
 
 
 # =========================================================
 # GENRES
 # =========================================================
 
-@dp.message(F.text == "📚 Janrlar")
-async def genres(message: Message):
-
-    if not await require_subscription(message):
-        return
+async def show_genres(message):
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         SELECT DISTINCT genre
         FROM movies
-        WHERE genre IS NOT NULL
-        AND genre != ''
+        WHERE genre != ''
         ORDER BY genre
-    """)
+        """
+    )
 
-    rows = cur.fetchall()
+    genres = cur.fetchall()
+
     conn.close()
 
-    if not rows:
+    if not genres:
 
         await message.answer(
-            "❌ Janrlar hali mavjud emas."
+            "❌ Hozircha janrlar mavjud emas."
         )
+
         return
 
-    buttons = []
+    keyboard = []
 
-    for row in rows:
+    for genre in genres:
 
-        genre = row[0]
+        name = genre[0]
 
-        buttons.append([
+        keyboard.append([
             InlineKeyboardButton(
-                text=f"🎭 {genre}",
-                callback_data=f"genre:{genre}"
+                text=f"🎭 {name}",
+                callback_data=f"genre:{name[:50]}"
             )
         ])
 
     await message.answer(
         "📚 <b>Janrlar:</b>",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=buttons
+            inline_keyboard=keyboard
         )
     )
 
 
 @dp.callback_query(F.data.startswith("genre:"))
-async def genre_callback(callback: CallbackQuery):
+async def genre_handler(
+    callback: CallbackQuery
+):
 
-    genre = callback.data.split(":", 1)[1]
+    genre = callback.data.split(
+        ":",
+        1
+    )[1]
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, code, title, alt_title,
-               year, genre, rating,
-               description, channel_message_id, views
+    cur.execute(
+        """
+        SELECT id, title, code, year, genre, views
         FROM movies
         WHERE genre = ?
-        ORDER BY id DESC
-    """, (genre,))
+        ORDER BY views DESC
+        LIMIT 20
+        """,
+        (genre,)
+    )
 
     movies = cur.fetchall()
+
     conn.close()
 
     if not movies:
 
         await callback.answer(
-            "Bu janrda kino yo‘q.",
+            "Bu janrda kino topilmadi.",
             show_alert=True
         )
+
         return
 
-    await callback.message.answer(
-        f"🎭 <b>{genre}</b>"
+    text = (
+        f"🎭 <b>{escape(str(genre))}</b>\n\n"
     )
 
     for movie in movies:
 
-        await callback.message.answer(
-            movie_text(movie),
-            reply_markup=movie_keyboard(movie[0])
+        movie_id, title, code, year, genre, views = movie
+
+        text += (
+            f"🎬 <b>{escape(str(title))}</b>\n"
+            f"🔢 {escape(str(code))} | "
+            f"📅 {year} | "
+            f"👁 {views}\n\n"
         )
+
+    await callback.message.answer(
+        text,
+        parse_mode="HTML"
+    )
 
     await callback.answer()
 
 
 # =========================================================
-# FAVORITES
+# FAVORITES LIST
 # =========================================================
 
-@dp.message(F.text == "❤️ Sevimlilar")
-async def favorites(message: Message):
-
-    if not await require_subscription(message):
-        return
+async def show_favorites(message):
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT m.id, m.code, m.title,
-               m.alt_title, m.year, m.genre,
-               m.rating, m.description,
-               m.channel_message_id, m.views
-        FROM movies m
-        INNER JOIN favorites f
-        ON m.id = f.movie_id
+    cur.execute(
+        """
+        SELECT m.id, m.title, m.code, m.year
+        FROM favorites f
+        JOIN movies m ON m.id = f.movie_id
         WHERE f.user_id = ?
         ORDER BY m.id DESC
-    """, (
-        message.from_user.id,
-    ))
+        """,
+        (message.from_user.id,)
+    )
 
     movies = cur.fetchall()
+
     conn.close()
 
     if not movies:
 
         await message.answer(
-            "❤️ Sevimlilar ro‘yxati bo‘sh."
+            "❤️ Sizda hali sevimli kinolar yo‘q."
         )
+
         return
+
+    text = "❤️ <b>SEVIMLI KINOLAR</b>\n\n"
 
     for movie in movies:
 
-        await message.answer(
-            movie_text(movie),
-            reply_markup=movie_keyboard(movie[0])
+        movie_id, title, code, year = movie
+
+        text += (
+            f"🎬 <b>{escape(str(title))}</b>\n"
+            f"🔢 {escape(str(code))} | 📅 {year}\n\n"
         )
+
+    await message.answer(
+        text,
+        parse_mode="HTML"
+    )
 
 
 # =========================================================
 # HELP
 # =========================================================
 
-@dp.message(F.text == "ℹ️ Yordam")
-async def help_handler(message: Message):
+async def help_handler(message):
 
-    text = (
-        "ℹ️ <b>Botdan foydalanish</b>\n\n"
-        "🔎 Kino kodi yoki nomini yuboring.\n"
-        "🎬 TOP — eng ko‘p ko‘rilgan kinolar.\n"
-        "🆕 Yangi — yangi qo‘shilgan kinolar.\n"
-        "📚 Janrlar — janr bo‘yicha qidirish.\n"
-        "❤️ Sevimlilar — saqlangan kinolar."
+    await message.answer(
+        "ℹ️ <b>YORDAM</b>\n\n"
+        "🔢 Kino kodini yuboring — kino chiqadi.\n"
+        "🔎 Kino nomini yuboring — qidiriladi.\n"
+        "❤️ Kino kartasidagi tugma orqali sevimliga qo‘shing.\n\n"
+        f"👨‍💻 Yordam: {escape(SUPPORT_USERNAME)}",
+        parse_mode="HTML"
     )
-
-    if SUPPORT_USERNAME:
-        text += f"\n\n💬 Yordam: {SUPPORT_USERNAME}"
-
-    await message.answer(text)
 
 
 # =========================================================
 # ADMIN PANEL
 # =========================================================
-
-class AddMovie(StatesGroup):
-    code = State()
-    title = State()
-    alt_title = State()
-    year = State()
-    genre = State()
-    rating = State()
-    description = State()
-    channel_message_id = State()
-
-
-class Broadcast(StatesGroup):
-    message = State()
-
 
 def admin_keyboard():
 
@@ -860,71 +1004,232 @@ def admin_keyboard():
 
 
 @dp.message(Command("admin"))
-@dp.message(Command("panel"))
-async def admin_panel(message: Message):
+async def admin_handler(message: Message):
 
     if not is_admin(message.from_user.id):
-        await message.answer("❌ Siz admin emassiz.")
+
+        await message.answer(
+            "❌ Siz admin emassiz."
+        )
+
         return
 
     await message.answer(
-        "⚙️ <b>Admin panel</b>",
+        "⚙️ <b>ADMIN PANEL</b>",
+        parse_mode="HTML",
         reply_markup=admin_keyboard()
     )
 
 
 # =========================================================
-# ADD MOVIE
+# ADMIN STATS
 # =========================================================
 
-@dp.callback_query(F.data == "admin_add")
-async def admin_add(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(
+    callback: CallbackQuery
+):
 
     if not is_admin(callback.from_user.id):
         return
 
-    await state.set_state(AddMovie.code)
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT COUNT(*) FROM users"
+    )
+    users = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT COUNT(*) FROM movies"
+    )
+    movies = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT COALESCE(SUM(views), 0) FROM movies"
+    )
+    views = cur.fetchone()[0]
+
+    conn.close()
 
     await callback.message.answer(
-        "➕ Kino kodi:"
+        "📊 <b>STATISTIKA</b>\n\n"
+        f"👥 Foydalanuvchilar: <b>{users}</b>\n"
+        f"🎬 Kinolar: <b>{movies}</b>\n"
+        f"👁 Umumiy ko‘rishlar: <b>{views}</b>",
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+
+
+# =========================================================
+# ADMIN MOVIES
+# =========================================================
+
+@dp.callback_query(F.data == "admin_movies")
+async def admin_movies(
+    callback: CallbackQuery
+):
+
+    if not is_admin(callback.from_user.id):
+        return
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT id, code, title, year, views
+        FROM movies
+        ORDER BY id DESC
+        LIMIT 30
+        """
+    )
+
+    movies = cur.fetchall()
+
+    conn.close()
+
+    if not movies:
+
+        await callback.message.answer(
+            "🎬 Kinolar mavjud emas."
+        )
+
+        return
+
+    text = "🎬 <b>KINOLAR</b>\n\n"
+
+    for movie in movies:
+
+        movie_id, code, title, year, views = movie
+
+        text += (
+            f"ID: <code>{movie_id}</code>\n"
+            f"🔢 {escape(str(code))}\n"
+            f"🎬 {escape(str(title))}\n"
+            f"📅 {year}\n"
+            f"👁 {views}\n\n"
+        )
+
+    await callback.message.answer(
+        text,
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+
+
+# =========================================================
+# ADD MOVIE STATE
+# =========================================================
+
+class AddMovie(StatesGroup):
+
+    code = State()
+    title = State()
+    alt_title = State()
+    year = State()
+    genre = State()
+    rating = State()
+    description = State()
+    channel_message_id = State()
+
+
+# =========================================================
+# ADMIN ADD
+# =========================================================
+
+@dp.callback_query(F.data == "admin_add")
+async def admin_add_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not is_admin(callback.from_user.id):
+        return
+
+    await state.set_state(
+        AddMovie.code
+    )
+
+    await callback.message.answer(
+        "➕ <b>KINO QO‘SHISH</b>\n\n"
+        "1️⃣ Kino kodini yuboring:",
+        parse_mode="HTML"
     )
 
     await callback.answer()
 
 
 @dp.message(AddMovie.code)
-async def add_code(message: Message, state: FSMContext):
+async def add_code(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    value = (message.text or "").strip()
+
+    if not value:
+
+        await message.answer(
+            "❌ Kod bo‘sh bo‘lishi mumkin emas."
+        )
+
+        return
 
     await state.update_data(
-        code=message.text.strip()
+        code=value
     )
 
-    await state.set_state(AddMovie.title)
+    await state.set_state(
+        AddMovie.title
+    )
 
     await message.answer(
-        "🎬 Kino nomi:"
+        "2️⃣ Kino nomini yuboring:"
     )
 
 
 @dp.message(AddMovie.title)
-async def add_title(message: Message, state: FSMContext):
+async def add_title(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
 
     await state.update_data(
-        title=message.text.strip()
+        title=(message.text or "").strip()
     )
 
-    await state.set_state(AddMovie.alt_title)
+    await state.set_state(
+        AddMovie.alt_title
+    )
 
     await message.answer(
-        "🌐 Boshqa nomi:\n"
-        "Agar bo‘lmasa: -"
+        "3️⃣ Boshqa nomi bo‘lsa yozing.\n"
+        "Bo‘lmasa <code>-</code> yuboring.",
+        parse_mode="HTML"
     )
 
 
 @dp.message(AddMovie.alt_title)
-async def add_alt_title(message: Message, state: FSMContext):
+async def add_alt_title(
+    message: Message,
+    state: FSMContext
+):
 
-    value = message.text.strip()
+    if not is_admin(message.from_user.id):
+        return
+
+    value = (message.text or "").strip()
 
     if value == "-":
         value = ""
@@ -933,60 +1238,115 @@ async def add_alt_title(message: Message, state: FSMContext):
         alt_title=value
     )
 
-    await state.set_state(AddMovie.year)
+    await state.set_state(
+        AddMovie.year
+    )
 
     await message.answer(
-        "📅 Yili:"
+        "4️⃣ Kino yilini yuboring:"
     )
 
 
 @dp.message(AddMovie.year)
-async def add_year(message: Message, state: FSMContext):
+async def add_year(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+
+        year = int(
+            (message.text or "").strip()
+        )
+
+    except ValueError:
+
+        await message.answer(
+            "❌ Yil raqam bo‘lishi kerak."
+        )
+
+        return
 
     await state.update_data(
-        year=message.text.strip()
+        year=year
     )
 
-    await state.set_state(AddMovie.genre)
+    await state.set_state(
+        AddMovie.genre
+    )
 
     await message.answer(
-        "🎭 Janri:"
+        "5️⃣ Janrini yuboring:\n"
+        "Masalan: Action, Drama"
     )
 
 
 @dp.message(AddMovie.genre)
-async def add_genre(message: Message, state: FSMContext):
+async def add_genre(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
 
     await state.update_data(
-        genre=message.text.strip()
+        genre=(message.text or "").strip()
     )
 
-    await state.set_state(AddMovie.rating)
+    await state.set_state(
+        AddMovie.rating
+    )
 
     await message.answer(
-        "⭐ Reytingi:"
+        "6️⃣ Reytingini yuboring:\n"
+        "Masalan: 8.5"
     )
 
 
 @dp.message(AddMovie.rating)
-async def add_rating(message: Message, state: FSMContext):
+async def add_rating(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
 
     await state.update_data(
-        rating=message.text.strip()
+        rating=(message.text or "").strip()
     )
 
-    await state.set_state(AddMovie.description)
+    await state.set_state(
+        AddMovie.description
+    )
 
     await message.answer(
-        "📝 Tavsifi:"
+        "7️⃣ Kino haqida qisqa ma'lumot yuboring.\n"
+        "Bo‘lmasa <code>-</code> yuboring.",
+        parse_mode="HTML"
     )
 
 
 @dp.message(AddMovie.description)
-async def add_description(message: Message, state: FSMContext):
+async def add_description(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    value = (message.text or "").strip()
+
+    if value == "-":
+        value = ""
 
     await state.update_data(
-        description=message.text.strip()
+        description=value
     )
 
     await state.set_state(
@@ -994,8 +1354,9 @@ async def add_description(message: Message, state: FSMContext):
     )
 
     await message.answer(
-        "📨 Kanal postining Message ID sini yuboring.\n\n"
-        "Masalan: 125"
+        "8️⃣ Kanal postining Message ID'sini yuboring.\n\n"
+        "Masalan: <code>152</code>",
+        parse_mode="HTML"
     )
 
 
@@ -1005,15 +1366,21 @@ async def add_channel_message_id(
     state: FSMContext
 ):
 
+    if not is_admin(message.from_user.id):
+        return
+
     try:
-        channel_message_id = int(
-            message.text.strip()
+
+        message_id = int(
+            (message.text or "").strip()
         )
+
     except ValueError:
 
         await message.answer(
-            "❌ Faqat raqam yuboring."
+            "❌ Message ID raqam bo‘lishi kerak."
         )
+
         return
 
     data = await state.get_data()
@@ -1023,9 +1390,9 @@ async def add_channel_message_id(
 
     try:
 
-        cur.execute("""
-            INSERT INTO movies
-            (
+        cur.execute(
+            """
+            INSERT INTO movies (
                 code,
                 title,
                 alt_title,
@@ -1033,24 +1400,33 @@ async def add_channel_message_id(
                 genre,
                 rating,
                 description,
-                channel_message_id
+                channel_message_id,
+                views,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data["code"],
-            data["title"],
-            data["alt_title"],
-            data["year"],
-            data["genre"],
-            data["rating"],
-            data["description"],
-            channel_message_id
-        ))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                data["code"],
+                data["title"],
+                data["alt_title"],
+                data["year"],
+                data["genre"],
+                data["rating"],
+                data["description"],
+                message_id,
+                datetime.now().isoformat()
+            )
+        )
 
         conn.commit()
 
         await message.answer(
-            "✅ <b>Kino muvaffaqiyatli qo‘shildi!</b>"
+            "✅ <b>KINO MUVAFFAQIYATLI QO‘SHILDI!</b>\n\n"
+            f"🎬 {escape(data['title'])}\n"
+            f"🔢 Kod: {escape(data['code'])}",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard()
         )
 
     except sqlite3.IntegrityError:
@@ -1062,97 +1438,108 @@ async def add_channel_message_id(
     finally:
 
         conn.close()
-        await state.clear()
+
+    await state.clear()
 
 
 # =========================================================
-# STATS
+# QUICK ADD
 # =========================================================
 
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: CallbackQuery):
+@dp.message(Command("add"))
+async def quick_add_info(
+    message: Message
+):
 
-    if not is_admin(callback.from_user.id):
+    if not is_admin(message.from_user.id):
+
+        await message.answer(
+            "❌ Siz admin emassiz."
+        )
+
         return
 
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM users")
-    users = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM movies")
-    movies = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COALESCE(SUM(views), 0)
-        FROM movies
-    """)
-
-    views = cur.fetchone()[0]
-
-    conn.close()
-
-    await callback.message.answer(
-        f"📊 <b>Statistika</b>\n\n"
-        f"👥 Foydalanuvchilar: <b>{users}</b>\n"
-        f"🎬 Kinolar: <b>{movies}</b>\n"
-        f"👁 Ko‘rishlar: <b>{views}</b>"
+    await message.answer(
+        "⚡ <b>Tezkor kino qo‘shish</b>\n\n"
+        "Kino kanalga joylashtirilgandan keyin "
+        "admin paneldagi «Kino qo‘shish» orqali "
+        "kino ma'lumotlarini kiriting.\n\n"
+        f"📌 Kanal ID: <code>{escape(CHANNEL_ID)}</code>",
+        parse_mode="HTML"
     )
 
-    await callback.answer()
-
 
 # =========================================================
-# MOVIES ADMIN
+# DELETE MOVIE
 # =========================================================
 
-@dp.callback_query(F.data == "admin_movies")
-async def admin_movies(callback: CallbackQuery):
+@dp.message(Command("delmovie"))
+async def delete_movie_command(
+    message: Message
+):
 
-    if not is_admin(callback.from_user.id):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+
+    if len(args) < 2:
+
+        await message.answer(
+            "Foydalanish:\n"
+            "<code>/delmovie ID</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    try:
+
+        movie_id = int(args[1])
+
+    except ValueError:
+
+        await message.answer(
+            "❌ ID noto‘g‘ri."
+        )
+
         return
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, code, title, views
-        FROM movies
-        ORDER BY id DESC
-    """)
+    cur.execute(
+        "DELETE FROM movies WHERE id = ?",
+        (movie_id,)
+    )
 
-    movies = cur.fetchall()
+    conn.commit()
+
+    deleted = cur.rowcount
+
     conn.close()
 
-    if not movies:
+    if deleted:
 
-        await callback.message.answer(
-            "🎬 Kinolar yo‘q."
-        )
-        return
-
-    text = "🎬 <b>Kinolar:</b>\n\n"
-
-    for movie_id, code, title, views in movies:
-
-        text += (
-            f"ID: <code>{movie_id}</code>\n"
-            f"🔑 Kod: <code>{code}</code>\n"
-            f"🎬 {title}\n"
-            f"👁 {views}\n\n"
+        await message.answer(
+            "✅ Kino o‘chirildi."
         )
 
-    await callback.message.answer(text)
-    await callback.answer()
+    else:
+
+        await message.answer(
+            "❌ Kino topilmadi."
+        )
 
 
 # =========================================================
-# COMMANDS
+# USERS
 # =========================================================
 
 @dp.message(Command("users"))
-async def users_command(message: Message):
+async def users_command(
+    message: Message
+):
 
     if not is_admin(message.from_user.id):
         return
@@ -1160,18 +1547,28 @@ async def users_command(message: Message):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM users")
+    cur.execute(
+        "SELECT COUNT(*) FROM users"
+    )
+
     count = cur.fetchone()[0]
 
     conn.close()
 
     await message.answer(
-        f"👥 Foydalanuvchilar: <b>{count}</b>"
+        f"👥 Foydalanuvchilar: <b>{count}</b>",
+        parse_mode="HTML"
     )
 
+
+# =========================================================
+# MOVIES COMMAND
+# =========================================================
 
 @dp.message(Command("movies"))
-async def movies_command(message: Message):
+async def movies_command(
+    message: Message
+):
 
     if not is_admin(message.from_user.id):
         return
@@ -1179,18 +1576,28 @@ async def movies_command(message: Message):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM movies")
+    cur.execute(
+        "SELECT COUNT(*) FROM movies"
+    )
+
     count = cur.fetchone()[0]
 
     conn.close()
 
     await message.answer(
-        f"🎬 Kinolar: <b>{count}</b>"
+        f"🎬 Kinolar soni: <b>{count}</b>",
+        parse_mode="HTML"
     )
 
 
+# =========================================================
+# STATS COMMAND
+# =========================================================
+
 @dp.message(Command("stats"))
-async def stats_command(message: Message):
+async def stats_command(
+    message: Message
+):
 
     if not is_admin(message.from_user.id):
         return
@@ -1198,10 +1605,16 @@ async def stats_command(message: Message):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM users")
+    cur.execute(
+        "SELECT COUNT(*) FROM users"
+    )
+
     users = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM movies")
+    cur.execute(
+        "SELECT COUNT(*) FROM movies"
+    )
+
     movies = cur.fetchone()[0]
 
     cur.execute(
@@ -1213,67 +1626,25 @@ async def stats_command(message: Message):
     conn.close()
 
     await message.answer(
-        f"📊 <b>Statistika</b>\n\n"
+        "📊 <b>STATISTIKA</b>\n\n"
         f"👥 Users: {users}\n"
         f"🎬 Movies: {movies}\n"
-        f"👁 Views: {views}"
+        f"👁 Views: {views}",
+        parse_mode="HTML"
     )
-
-
-@dp.message(Command("delmovie"))
-async def delete_movie(message: Message):
-
-    if not is_admin(message.from_user.id):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-
-        await message.answer(
-            "❌ Foydalanish:\n"
-            "<code>/delmovie ID</code>"
-        )
-        return
-
-    try:
-        movie_id = int(parts[1])
-    except ValueError:
-
-        await message.answer(
-            "❌ ID raqam bo‘lishi kerak."
-        )
-        return
-
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute(
-        "DELETE FROM movies WHERE id = ?",
-        (movie_id,)
-    )
-
-    deleted = cur.rowcount
-
-    conn.commit()
-    conn.close()
-
-    if deleted:
-        await message.answer(
-            "✅ Kino o‘chirildi."
-        )
-    else:
-        await message.answer(
-            "❌ Bunday ID topilmadi."
-        )
 
 
 # =========================================================
 # BROADCAST
 # =========================================================
 
+class BroadcastState(StatesGroup):
+
+    text = State()
+
+
 @dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(
+async def broadcast_start(
     callback: CallbackQuery,
     state: FSMContext
 ):
@@ -1282,19 +1653,19 @@ async def admin_broadcast(
         return
 
     await state.set_state(
-        Broadcast.message
+        BroadcastState.text
     )
 
     await callback.message.answer(
         "📢 Barcha foydalanuvchilarga yuboriladigan "
-        "xabarni yuboring."
+        "xabarni yuboring:"
     )
 
     await callback.answer()
 
 
-@dp.message(Broadcast.message)
-async def broadcast_message(
+@dp.message(BroadcastState.text)
+async def broadcast_send(
     message: Message,
     state: FSMContext
 ):
@@ -1306,16 +1677,24 @@ async def broadcast_message(
     cur = conn.cursor()
 
     cur.execute(
-        "SELECT user_id FROM users"
+        "SELECT id FROM users"
     )
 
     users = cur.fetchall()
+
     conn.close()
 
     success = 0
     failed = 0
 
-    for (user_id,) in users:
+    await message.answer(
+        f"📢 Xabar {len(users)} ta foydalanuvchiga "
+        f"yuborilmoqda..."
+    )
+
+    for user in users:
+
+        user_id = user[0]
 
         try:
 
@@ -1327,38 +1706,76 @@ async def broadcast_message(
 
             success += 1
 
-        except Exception:
+            # Telegram flood limitga tushmaslik uchun
+            await asyncio.sleep(0.05)
+
+        except Exception as e:
+
+            logger.warning(
+                f"Broadcast error {user_id}: {e}"
+            )
 
             failed += 1
 
-        await asyncio.sleep(0.05)
+    await message.answer(
+        "✅ <b>Tarqatish tugadi!</b>\n\n"
+        f"✅ Yuborildi: {success}\n"
+        f"❌ Xatolik: {failed}",
+        parse_mode="HTML"
+    )
 
     await state.clear()
 
+
+# =========================================================
+# ADMIN PANEL COMMAND
+# =========================================================
+
+@dp.message(Command("panel"))
+async def panel_command(
+    message: Message
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
     await message.answer(
-        f"📢 <b>Reklama tugadi</b>\n\n"
-        f"✅ Yuborildi: {success}\n"
-        f"❌ Xatolik: {failed}"
+        "⚙️ <b>ADMIN PANEL</b>",
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
     )
 
 
 # =========================================================
-# HTTP SERVER
+# HTTP SERVER — RENDER WEB SERVICE
 # =========================================================
 
 async def health(request):
-
     return web.Response(
-        text="Kino bot is running!"
+        text="Kino bot ishlayapti ✅"
     )
 
 
-async def start_http_server():
+async def health_json(request):
+    return web.json_response({
+        "status": "ok",
+        "bot": "kino_bot"
+    })
+
+
+async def start_web_server():
 
     app = web.Application()
 
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
+    app.router.add_get(
+        "/",
+        health
+    )
+
+    app.router.add_get(
+        "/health",
+        health_json
+    )
 
     runner = web.AppRunner(app)
 
@@ -1373,8 +1790,7 @@ async def start_http_server():
     await site.start()
 
     logger.info(
-        "HTTP server started on port %s",
-        PORT
+        f"HTTP server 0.0.0.0:{PORT} da ishga tushdi."
     )
 
     return runner
@@ -1386,27 +1802,71 @@ async def start_http_server():
 
 async def main():
 
-    logger.info(
-        "Bot ishga tushmoqda..."
-    )
-
     init_db()
 
-    http_runner = await start_http_server()
+    logger.info(
+        "======================================"
+    )
+
+    logger.info(
+        "KINO BOT ISHGA TUSHMOQDA"
+    )
+
+    logger.info(
+        f"Adminlar: {ADMIN_IDS}"
+    )
+
+    logger.info(
+        f"Movie channel: {CHANNEL_ID}"
+    )
+
+    logger.info(
+        f"Force subscribe: {FORCE_SUB_CHANNEL}"
+    )
+
+    logger.info(
+        f"Support: {SUPPORT_USERNAME}"
+    )
+
+    logger.info(
+        f"PORT: {PORT}"
+    )
+
+    logger.info(
+        "======================================"
+    )
+
+    # Render Web Service uchun HTTP server
+    web_runner = await start_web_server()
+
+    # Eski webhookni o'chirish
+    await bot.delete_webhook(
+        drop_pending_updates=True
+    )
 
     try:
 
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types()
-        )
+        await dp.start_polling(bot)
 
     finally:
 
+        await web_runner.cleanup()
+
         await bot.session.close()
 
-        await http_runner.cleanup()
 
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    try:
+
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Bot to‘xtatildi."
+)
