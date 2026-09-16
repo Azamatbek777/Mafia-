@@ -26,21 +26,21 @@ BOT_TOKEN = "7923870040:AAFAaupf6uqqN78JNLZroUId7ic_5j4u4-k"
 
 # O'zingizning Telegram ID'ingiz
 ADMIN_IDS = {
-    123456789
+    6698039974
 }
 
 # Kino joylashtiriladigan kanal ID'si
 # Masalan: -1001234567890
-CHANNEL_ID = -1001234567890
+CHANNEL_ID = -2674674304
 
 # Majburiy obuna kanali
-FORCE_SUB_CHANNEL = "@your_channel"
+FORCE_SUB_CHANNEL = "@Digital_UzIT"
 
 # Majburiy obuna kanaliga havola
-FORCE_SUB_LINK = "https://t.me/your_channel"
+FORCE_SUB_LINK = "https://t.me/Digital_UzIT"
 
 # Yordam uchun username
-SUPPORT_USERNAME = "@your_username"
+SUPPORT_USERNAME = "@azamat_x007"
 
 
 # =========================================================
