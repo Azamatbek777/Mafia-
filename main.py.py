@@ -6,7 +6,7 @@ from datetime import datetime
 from html import escape
 
 from aiohttp import web
-from dotenv import load_dotenv
+
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
